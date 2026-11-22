@@ -6,7 +6,7 @@ Each uploaded image will generate one independently tracked and downloadable `.g
 
 ## Implementation documents
 
-- [01 — Generation service and Windows Docker](01-generation-service.md) specifies the CUDA build, API, worker, progress, storage, and recovery.
+- [01 — Generation service and Windows Docker](01-generation-service.md) specifies the CUDA build, client-independent API, FIFO scheduling, progress, storage, and recovery.
 - [02 — Frontend](02-frontend.md) specifies the React, Express, Tailwind CSS, and Zod setup, upload page, single active generation, and finished assets.
 - [03 — Frontend implementation handoff](03-frontend-implementation.md) specifies the project files, component behavior, API proxy, and Docker integration for a developer.
 
