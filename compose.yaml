@@ -1,0 +1,29 @@
+services:
+  frontend:
+    build: ./frontend
+    environment:
+      GENERATOR_URL: http://generation:8000
+    ports:
+      - "127.0.0.1:8080:8080"
+  generation:
+    build:
+      context: .
+      dockerfile: generation/Dockerfile
+    init: true
+    expose:
+      - "8000"
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - generation-data:/data
+      - huggingface-cache:/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  generation-data:
+  huggingface-cache:

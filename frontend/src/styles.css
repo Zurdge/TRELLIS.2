@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI", system-ui, sans-serif;
+}
+
+@layer base {
+  body { @apply min-w-0 bg-slate-950 text-slate-100 antialiased; }
+  h2 { @apply text-lg font-semibold tracking-tight; }
+  :is(a, button, input, summary):focus-visible { @apply outline-2 outline-offset-4 outline-teal-300; }
+  progress { accent-color: #5eead4; }
+}
+
+@layer components {
+  .panel { @apply rounded-2xl border border-slate-800 bg-slate-900 p-5 sm:p-7; }
+  .muted { @apply text-sm text-slate-400; }
+  .button { @apply inline-flex items-center rounded-lg bg-teal-300 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-teal-200 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-300; }
+}

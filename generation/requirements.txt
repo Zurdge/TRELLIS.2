@@ -1,0 +1,16 @@
+fastapi==0.128.0
+uvicorn==0.40.0
+python-multipart==0.0.22
+Pillow==12.1.1
+transformers==4.57.3
+numpy<2.3
+tqdm
+easydict
+opencv-python-headless
+trimesh
+plyfile
+zstandard
+kornia
+timm
+einops
+git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8

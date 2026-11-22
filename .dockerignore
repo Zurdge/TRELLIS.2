@@ -1,0 +1,8 @@
+.git
+.env
+.env.*
+**/.git
+**/__pycache__
+assets
+plan
+frontend

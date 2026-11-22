@@ -137,7 +137,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         max_size = max(input.size)
         scale = min(1, 1024 / max_size)
         if scale < 1:
-            input = input.resize((int(input.width * scale), int(input.height * scale)), Image.Resampling.LANCZOS)
+            input = input.resize((max(1, int(input.width * scale)), max(1, int(input.height * scale))), Image.Resampling.LANCZOS)
         if has_alpha:
             output = input
         else:
@@ -150,10 +150,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         output_np = np.array(output)
         alpha = output_np[:, :, 3]
         bbox = np.argwhere(alpha > 0.8 * 255)
+        if not len(bbox):
+            raise ValueError("No usable foreground found.")
         bbox = np.min(bbox[:, 1]), np.min(bbox[:, 0]), np.max(bbox[:, 1]), np.max(bbox[:, 0])
         center = (bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2
         size = max(bbox[2] - bbox[0], bbox[3] - bbox[1])
-        size = int(size * 1)
+        if size < 2:
+            raise ValueError("No usable foreground found.")
         bbox = center[0] - size // 2, center[1] - size // 2, center[0] + size // 2, center[1] + size // 2
         output = output.crop(bbox)  # type: ignore
         output = np.array(output).astype(np.float32) / 255
@@ -498,6 +501,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         return_latent: bool = False,
         pipeline_type: Optional[str] = None,
         max_num_tokens: int = 49152,
+        progress_callback: Optional[Callable[[str], None]] = None,
     ) -> List[MeshWithVoxel]:
         """
         Run the pipeline.
@@ -533,21 +537,27 @@ class Trellis2ImageTo3DPipeline(Pipeline):
         else:
             raise ValueError(f"Invalid pipeline type: {pipeline_type}")
         
+        report = progress_callback or (lambda stage: None)
+        report("preparing_image")
         if preprocess_image:
             image = self.preprocess_image(image)
         torch.manual_seed(seed)
+        report("extracting_features")
         cond_512 = self.get_cond([image], 512)
         cond_1024 = self.get_cond([image], 1024) if pipeline_type != '512' else None
         ss_res = {'512': 32, '1024': 64, '1024_cascade': 32, '1536_cascade': 32}[pipeline_type]
+        report("generating_structure")
         coords = self.sample_sparse_structure(
             cond_512, ss_res,
             num_samples, sparse_structure_sampler_params
         )
+        report("generating_shape")
         if pipeline_type == '512':
             shape_slat = self.sample_shape_slat(
                 cond_512, self.models['shape_slat_flow_model_512'],
                 coords, shape_slat_sampler_params
             )
+            report("generating_materials")
             tex_slat = self.sample_tex_slat(
                 cond_512, self.models['tex_slat_flow_model_512'],
                 shape_slat, tex_slat_sampler_params
@@ -558,6 +568,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 cond_1024, self.models['shape_slat_flow_model_1024'],
                 coords, shape_slat_sampler_params
             )
+            report("generating_materials")
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
@@ -571,6 +582,7 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
+            report("generating_materials")
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
@@ -583,11 +595,13 @@ class Trellis2ImageTo3DPipeline(Pipeline):
                 coords, shape_slat_sampler_params,
                 max_num_tokens
             )
+            report("generating_materials")
             tex_slat = self.sample_tex_slat(
                 cond_1024, self.models['tex_slat_flow_model_1024'],
                 shape_slat, tex_slat_sampler_params
             )
         torch.cuda.empty_cache()
+        report("decoding_mesh")
         out_mesh = self.decode_latent(shape_slat, tex_slat, res)
         if return_latent:
             return out_mesh, (shape_slat, tex_slat, res)
