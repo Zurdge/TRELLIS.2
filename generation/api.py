@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -11,11 +12,12 @@ from urllib.parse import quote
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 from starlette.responses import FileResponse, JSONResponse
 
+from .settings import DEFAULT_SETTINGS, GenerationSettings, settings_part_schema
 from .store import Job, Jobs, Store, basename, is_job_id
 from .supervisor import Supervisor
 from .worker import worker_main
@@ -25,6 +27,7 @@ MIB = 1024**2
 MAX_FILE = 10 * MIB
 MAX_REQUEST = 82 * MIB
 MAX_PIXELS = 16_000_000
+MAX_SETTINGS = 4096
 NO_STORE = {"Cache-Control": "no-store"}
 
 
@@ -61,7 +64,35 @@ class CompleteMultipartParser(MultiPartParser):
         self.complete = True
 
 
-def validate_upload(parts, staging):
+def unique_settings_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ApiError(400, "invalid_settings", f"Duplicate settings key: {key}.")
+        result[key] = value
+    return result
+
+
+def parse_settings(raw):
+    try:
+        values = json.loads(raw, object_pairs_hook=unique_settings_keys)
+    except (ValueError, RecursionError):
+        raise ApiError(400, "invalid_settings", "Settings must be a valid JSON object.") from None
+    if not isinstance(values, dict):
+        raise ApiError(400, "invalid_settings", "Settings must be a JSON object.")
+    try:
+        return GenerationSettings.model_validate({**DEFAULT_SETTINGS.model_dump(), **values})
+    except ValidationError as exc:
+        issue = exc.errors()[0]
+        key = issue["loc"][0]
+        if issue["type"] == "extra_forbidden":
+            message = f"Unknown settings key '{key}'."
+        else:
+            message = f"Invalid setting '{key}'. {issue['msg']}."
+        raise ApiError(400, "invalid_settings", message) from None
+
+
+def validate_upload(parts, staging, settings=DEFAULT_SETTINGS):
     batch = []
     for index, (_, upload) in enumerate(parts):
         filename = basename(upload.filename)
@@ -79,7 +110,7 @@ def validate_upload(parts, staging):
             raise ApiError(413, "upload_too_large", "Each image must be at most 16 megapixels.", **fields)
         except (OSError, ValueError, SyntaxError, OverflowError):
             raise ApiError(400, "invalid_upload", "Provide a readable, static JPEG, PNG, or WebP image.", **fields)
-        job = Job.queued(filename)
+        job = Job.queued(filename, settings)
         folder = staging / job.id
         folder.mkdir()
         upload.file.seek(0)
@@ -156,11 +187,11 @@ def create_app(root, worker=worker_main):
     @app.get("/jobs", response_model=Jobs, responses=errors(503))
     async def history():
         require_store()
-        return JSONResponse({"jobs": [job.model_dump() for job in reversed(store.jobs)]}, headers=NO_STORE)
+        return JSONResponse({"jobs": [job.public_record() for job in reversed(store.jobs)]}, headers=NO_STORE)
 
     @app.get("/jobs/{job_id}", response_model=Job, responses=errors(404, 503))
     async def details(job_id: str):
-        return JSONResponse(find_job(job_id).model_dump(), headers=NO_STORE)
+        return JSONResponse(find_job(job_id).public_record(), headers=NO_STORE)
 
     @app.get("/jobs/{job_id}/download", response_class=FileResponse, responses={
         200: {"content": {"model/gltf-binary": {"schema": {"type": "string", "format": "binary"}}}},
@@ -193,14 +224,16 @@ def create_app(root, worker=worker_main):
               openapi_extra={"requestBody": {"required": True, "content": {"multipart/form-data": {
                   "schema": {"type": "object", "required": ["images"], "properties": {
                       "images": {"type": "array", "minItems": 1, "maxItems": 8,
-                                 "items": {"type": "string", "format": "binary"}}
+                                 "items": {"type": "string", "format": "binary"}},
+                      "settings": settings_part_schema(),
                   }},
-                  "example": {"images": ["example.png"]},
+                  "example": {"images": ["example.png"], "settings": '{"pipeline_type":"1024_cascade","texture_size":2048}'},
               }}}})
     async def submit(request: Request):
         """Accept 1–8 still JPEG, PNG, or WebP images as one durable batch.
 
-        A 202 returns queued records in upload order. A 400, 413, or 503
+        An optional JSON text part named settings applies to every image.
+        A 202 returns queued records and resolved settings in upload order. A 400, 413, or 503
         guarantees that the batch was not accepted. Each file is limited to
         10 MiB and 16 megapixels, and the multipart body is limited to 82 MiB.
         """
@@ -219,7 +252,8 @@ def create_app(root, worker=worker_main):
                     raise UploadOverflow("The request must be at most 82 MiB.")
                 yield chunk
 
-        parser = CompleteMultipartParser(request.headers, limited_stream(), max_files=8, max_fields=0)
+        parser = CompleteMultipartParser(request.headers, limited_stream(), max_files=8, max_fields=1,
+                                         max_part_size=MAX_SETTINGS)
         try:
             form = await parser.parse()
         except UploadOverflow as exc:
@@ -229,7 +263,7 @@ def create_app(root, worker=worker_main):
                 file.close()
             from python_multipart.exceptions import MultipartParseError
             if isinstance(exc, (MultiPartException, MultipartParseError)):
-                raise ApiError(400, "invalid_upload", "Send 1–8 files in repeated images fields.")
+                raise ApiError(400, "invalid_upload", "Send 1–8 images and at most one settings text field of at most 4 KiB.")
             raise
 
         try:
@@ -238,18 +272,28 @@ def create_app(root, worker=worker_main):
                 for file in parser._files_to_close_on_error:
                     file.close()
                 raise ApiError(400, "invalid_upload", "The multipart request is incomplete.")
-            if not parts or any(name != "images" or not isinstance(upload, UploadFile) for name, upload in parts):
+            images = []
+            settings_part = None
+            for name, value in parts:
+                if name == "images" and isinstance(value, UploadFile):
+                    images.append((name, value))
+                elif name == "settings" and isinstance(value, str):
+                    settings_part = value
+                else:
+                    raise ApiError(400, "invalid_upload", "Send images as files and settings as a text field.")
+            if not images:
                 raise ApiError(400, "invalid_upload", "Send 1–8 files in repeated images fields.")
+            settings = parse_settings(settings_part) if settings_part is not None else DEFAULT_SETTINGS
             with tempfile.TemporaryDirectory(dir=store.staging) as folder:
                 staging = Path(folder)
-                batch = await asyncio.to_thread(validate_upload, parts, staging)
+                batch = await asyncio.to_thread(validate_upload, images, staging, settings)
                 require_ready()
                 try:
                     accepted = store.accept(batch, staging)
                 except OSError:
                     supervisor.store_error()
                     raise ApiError(500, "internal_error", "The job batch could not be recorded.")
-                return JSONResponse({"jobs": [job.model_dump() for job in accepted]}, status_code=202, headers=NO_STORE)
+                return JSONResponse({"jobs": [job.public_record() for job in accepted]}, status_code=202, headers=NO_STORE)
         finally:
             await form.close()
 

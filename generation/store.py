@@ -10,7 +10,10 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from .settings import GenerationSettings, LEGACY_SETTINGS, valid_actual_resolution
+
 Stage = Literal[
+    "loading_checkpoints",
     "preparing_image", "extracting_features", "generating_structure",
     "generating_shape", "generating_materials", "decoding_mesh", "exporting_glb",
 ]
@@ -35,7 +38,8 @@ def basename(filename):
 
 
 class Job(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid", json_schema_extra={"examples": [{
+    model_config = ConfigDict(frozen=True, extra="forbid", json_schema_serialization_defaults_required=True,
+                              json_schema_extra={"examples": [{
         "id": "1a707a1f-afb9-4200-bda4-801de2634831",
         "filename": "example.png",
         "status": "queued",
@@ -44,6 +48,8 @@ class Job(BaseModel):
         "updated_at": "2026-01-01T00:00:00Z",
         "error": None,
         "download_url": None,
+        "settings": LEGACY_SETTINGS.model_dump(),
+        "actual_resolution": None,
     }]})
 
     id: str
@@ -54,9 +60,16 @@ class Job(BaseModel):
     updated_at: str
     error: str | None
     download_url: str | None
+    settings: GenerationSettings = LEGACY_SETTINGS
+    actual_resolution: int | None = None
 
     @model_validator(mode="after")
     def validate_record(self):
+        if self.actual_resolution is not None and (
+            self.status not in ("running", "succeeded")
+            or not valid_actual_resolution(self.settings.pipeline_type, self.actual_resolution)
+        ):
+            raise ValueError("Invalid actual resolution")
         if not is_job_id(self.id) or self.filename != basename(self.filename):
             raise ValueError("Invalid job identity")
         for timestamp in (self.created_at, self.updated_at):
@@ -72,11 +85,17 @@ class Job(BaseModel):
             raise ValueError("Invalid job error")
         return self
 
+    def public_record(self):
+        data = self.model_dump()
+        if self.status != "succeeded":
+            data["actual_resolution"] = None
+        return data
+
     @classmethod
-    def queued(cls, filename):
+    def queued(cls, filename, settings=LEGACY_SETTINGS):
         timestamp = now()
         return cls(id=str(uuid4()), filename=filename, status="queued", stage=None,
-                   created_at=timestamp, updated_at=timestamp, error=None, download_url=None)
+                   created_at=timestamp, updated_at=timestamp, error=None, download_url=None, settings=settings)
 
 
 class Jobs(BaseModel):
@@ -170,6 +189,7 @@ class Store:
 
     def finish(self, job, error=None):
         return self.update(job, status="failed" if error else "succeeded", stage=None,
+                           actual_resolution=None if error else job.actual_resolution,
                            error=error, download_url=None if error else f"/jobs/{job.id}/download")
 
     def recover_running(self, error):

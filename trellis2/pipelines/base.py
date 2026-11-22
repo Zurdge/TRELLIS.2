@@ -4,6 +4,13 @@ import torch.nn as nn
 from .. import models
 
 
+def load_pretrained_model(path: str, checkpoint: str):
+    try:
+        return models.from_pretrained(f"{path}/{checkpoint}")
+    except Exception:
+        return models.from_pretrained(checkpoint)
+
+
 class Pipeline:
     """
     A base class for pipelines.
@@ -40,10 +47,7 @@ class Pipeline:
         for k, v in args['models'].items():
             if hasattr(cls, 'model_names_to_load') and k not in cls.model_names_to_load:
                 continue
-            try:
-                _models[k] = models.from_pretrained(f"{path}/{v}")
-            except Exception as e:
-                _models[k] = models.from_pretrained(v)
+            _models[k] = load_pretrained_model(path, v)
 
         new_pipeline = cls(_models)
         new_pipeline._pretrained_args = args

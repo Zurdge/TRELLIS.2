@@ -10,6 +10,13 @@ Each uploaded image will generate one independently tracked and downloadable `.g
 - [02 — Frontend](02-frontend.md) specifies the React, Express, Tailwind CSS, and Zod setup, upload page, single active generation, and finished assets.
 - [03 — Frontend implementation handoff](03-frontend-implementation.md) specifies the project files, component behavior, API proxy, and Docker integration for a developer.
 
+## Next phase
+
+- [04 — Generation settings for queued uploads](04-generation-settings.md) defines the settings contract, durable job snapshots, worker integration, and GPU verification.
+- [05 — Frontend generation settings](05-frontend-generation-settings.md) covers the upload controls, validation, and display of saved settings.
+- [06 — Generation resolution for queued jobs](06-generation-resolution-service.md) covers the four built-in modes, model loading, and actual resolution reporting.
+- [07 — Generation resolution in the upload form](07-frontend-generation-resolution.md) covers the mode selector and how requested and actual grids appear in job history.
+
 ## Implementation and verification order
 
 1. Identify the Windows GPU and verify Docker GPU access. Build the matching generation image, check CUDA and attention kernels, and generate a 512³ GLB using the bundled example. Record elapsed time, peak VRAM, and the last reported stage.

@@ -42,6 +42,32 @@ curl.exe -F "images=@assets/example_image/T.png" http://127.0.0.1:8000/jobs
 curl.exe http://127.0.0.1:8000/jobs
 ```
 
+Send an optional `settings` multipart text field containing a JSON object.
+The same values apply to every image in that upload. The response and job
+history report the resolved settings for each job.
+
+```powershell
+$settingsJson = '{"pipeline_type":"1024_cascade","seed":0,"sampling_steps":16,"texture_size":2048,"decimation_target":250000}'
+$settingsJson | curl.exe -F 'images=@assets/example_image/T.png' -F 'settings=<-' http://127.0.0.1:8000/jobs
+```
+
+| Setting | Default | Accepted values |
+| --- | --- | --- |
+| `pipeline_type` | `"512"` | `"512"`, `"1024"` (direct), `"1024_cascade"`, or `"1536_cascade"` |
+| `seed` | 42 | Integer from 0 to 2,147,483,647 |
+| `sampling_steps` | 12 | Integer from 8 to 24, applied to each sampling stage |
+| `texture_size` | 1024 | 1024 or 2048 pixels per side |
+| `decimation_target` | 100000 | Integer from 50,000 to 500,000 triangles |
+
+The first job above 512³ loads additional checkpoints. Higher modes may need
+more system RAM and GPU memory. Completed jobs report `actual_resolution` as the
+voxel grid size per axis. A 1536³ cascade can produce a smaller grid when its
+sparse token threshold is reached. Its saved `settings.pipeline_type` still
+shows the requested mode. Older jobs may have a null actual resolution.
+
+Back up the data volume before upgrading if you need to roll back. The earlier
+service cannot read job records after the new fields have been written.
+
 Poll the job until it succeeds, then download its `download_url`. The generation
 log includes each stage, elapsed time, and peak PyTorch CUDA memory. The API
 starts serving persisted history even when model initialization fails.

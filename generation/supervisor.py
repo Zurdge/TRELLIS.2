@@ -2,6 +2,7 @@ import asyncio
 import logging
 import multiprocessing
 
+from .settings import valid_actual_resolution
 from .store import STAGES, valid_glb, sync_dir
 from .worker import worker_main
 
@@ -90,10 +91,14 @@ class Supervisor:
             if stage in STAGES and (job.stage is None or STAGES.index(stage) > STAGES.index(job.stage)):
                 self.active = self.store.update(job, stage=stage)
         elif kind == "artifact_ready":
-            if valid_glb(partial, flush=True):
+            if len(parts) != 2 or not valid_actual_resolution(job.settings.pipeline_type, parts[1]):
+                partial.unlink(missing_ok=True)
+                self.store.finish(job, "The worker reported an invalid generation resolution.")
+            elif valid_glb(partial, flush=True):
+                self.active = self.store.update(job, actual_resolution=parts[1])
                 partial.replace(folder / "model.glb")
                 sync_dir(folder)
-                self.store.finish(job)
+                self.store.finish(self.active)
             else:
                 partial.unlink(missing_ok=True)
                 self.store.finish(job, "The exporter produced an invalid GLB.")
@@ -119,7 +124,7 @@ class Supervisor:
                 self.active = None
                 continue
             try:
-                self.pipe.send(("run", job.id))
+                self.pipe.send(("run", job.id, job.settings))
             except (OSError, EOFError):
                 await self.worker_lost("The generation worker exited.")
             return

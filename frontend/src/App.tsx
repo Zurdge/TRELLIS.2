@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { readHealth, readJobs, selection, stages, submitJobs, type Health, type Job } from './api'
+import { defaultSettingsInput, generationSettings, readHealth, readJobs, selection, stages, submitJobs,
+  type Health, type Job, type SettingsInput } from './api'
 import { usePolling } from './usePolling'
 import { ServiceHealth } from './components/ServiceHealth'
 import { UploadForm } from './components/UploadForm'
@@ -11,6 +12,7 @@ export default function App() {
   const [jobs, setJobs] = useState<Job[]>([])
   const [stale, setStale] = useState(false)
   const [files, setFiles] = useState<File[]>([])
+  const [settings, setSettings] = useState<SettingsInput>(defaultSettingsInput)
   const [busy, setBusy] = useState(false)
   const [checking, setChecking] = useState(false)
   const [feedback, setFeedback] = useState('')
@@ -42,21 +44,28 @@ export default function App() {
   useEffect(() => () => submission.current?.abort(), [])
 
   const valid = selection.safeParse(files)
-  const enabled = valid.success && health.status === 'ready' && !busy && !checking
+  const validatedSettings = generationSettings.safeParse({
+    pipeline_type: settings.pipeline_type,
+    seed: settings.seed.trim() ? Number(settings.seed) : undefined,
+    sampling_steps: settings.sampling_steps.trim() ? Number(settings.sampling_steps) : undefined,
+    texture_size: Number(settings.texture_size),
+    decimation_target: settings.decimation_target.trim() ? Number(settings.decimation_target) : undefined,
+  })
+  const enabled = valid.success && validatedSettings.success && health.status === 'ready' && !busy && !checking
   const active = jobs.find(job => job.status === 'running')
-  const waiting = jobs.filter(job => job.status === 'queued').length
+  const queued = jobs.filter(job => job.status === 'queued').reverse()
   const completed = jobs.filter(job => job.status === 'succeeded').length
   const failures = jobs.filter(job => job.status === 'failed').length
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!enabled || submission.current) return
+    if (!enabled || !validatedSettings.success || submission.current) return
     const controller = new AbortController()
     submission.current = controller
     setBusy(true)
     setFeedback('')
     try {
-      const result = await submitJobs(files, AbortSignal.any([controller.signal, AbortSignal.timeout(123_000)]))
+      const result = await submitJobs(files, validatedSettings.data, AbortSignal.any([controller.signal, AbortSignal.timeout(123_000)]))
       if (controller.signal.aborted) return
       if (result.jobs) {
         refreshJobs()
@@ -91,13 +100,17 @@ export default function App() {
     </header>
     <p className="sr-only" aria-live="polite">
       Generator {health.status}. {active ? `${active.filename}, ${active.stage ? stages[active.stage] : 'Starting generation'}.` : 'No generation running.'}
-      {' '}{waiting} waiting. {completed} completed. {failures} failed.
+      {' '}{queued.length} waiting. {completed} completed. {failures} failed.
     </p>
     <UploadForm files={files} picker={picker} busy={busy} enabled={enabled} feedback={feedback}
       validation={files.length && !valid.success ? valid.error.issues[0].message : undefined}
+      settings={settings}
+      invalidSettings={validatedSettings.success ? [] : validatedSettings.error.issues.map(issue => issue.path[0])}
+      changeSetting={(key, value) => { setSettings(current => ({ ...current, [key]: value })); setFeedback('') }}
+      resetSettings={() => { setSettings(defaultSettingsInput); setFeedback('') }}
       choose={next => { setFiles(next); setFeedback('') }} submit={submit} />
     {stale && <p className="muted px-2" role="status">Job history is temporarily unavailable. Showing the last received history.</p>}
-    <CurrentGeneration active={active} waiting={waiting} />
+    <CurrentGeneration active={active} queued={queued} />
     <FinishedAssets jobs={jobs} />
   </main>
 }

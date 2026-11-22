@@ -5,6 +5,24 @@ import time
 from PIL import Image, ImageOps
 
 log = logging.getLogger(__name__)
+MODEL_REPOSITORY = "microsoft/TRELLIS.2-4B"
+HIGH_RESOLUTION_MODELS = ("shape_slat_flow_model_1024", "tex_slat_flow_model_1024")
+
+
+class CheckpointLoadError(RuntimeError):
+    pass
+
+
+def load_high_resolution_models(pipeline, load_model, stage):
+    if all(name in pipeline.models for name in HIGH_RESOLUTION_MODELS):
+        return
+    stage("loading_checkpoints")
+    checkpoints = pipeline._pretrained_args["models"]
+    loaded = {
+        name: load_model(MODEL_REPOSITORY, checkpoints[name]).eval()
+        for name in HIGH_RESOLUTION_MODELS
+    }
+    pipeline.models.update(loaded)
 
 
 def probe_cuda():
@@ -32,6 +50,7 @@ def worker_main(pipe, directory):
         from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import GatedRepoError
         from trellis2.pipelines import Trellis2ImageTo3DPipeline
+        from trellis2.pipelines.base import load_pretrained_model
 
         for gated_model in ("facebook/dinov3-vitl16-pretrain-lvd1689m", "briaai/RMBG-2.0"):
             try:
@@ -46,7 +65,7 @@ def worker_main(pipe, directory):
                 name for name in Trellis2ImageTo3DPipeline.model_names_to_load if not name.endswith("_1024")
             ]
 
-        pipeline = Pipeline512.from_pretrained("microsoft/TRELLIS.2-4B")
+        pipeline = Pipeline512.from_pretrained(MODEL_REPOSITORY)
         pipeline.low_vram = True
         pipeline.cuda()
     except Exception:
@@ -57,13 +76,19 @@ def worker_main(pipe, directory):
     pipe.send(("ready",))
     while True:
         try:
-            command, job_id = pipe.recv()
+            command, job_id, settings = pipe.recv()
         except EOFError:
             return
         if command != "run":
             return
 
+        last_stage = None
+
         def stage(value):
+            nonlocal last_stage
+            if value == last_stage:
+                return
+            last_stage = value
             log.info("%s %s", job_id, value)
             pipe.send(("stage", job_id, value))
 
@@ -71,21 +96,33 @@ def worker_main(pipe, directory):
         try:
             torch.cuda.reset_peak_memory_stats()
             folder = directory / job_id
+            if settings.pipeline_type != "512":
+                try:
+                    load_high_resolution_models(pipeline, load_pretrained_model, stage)
+                except torch.cuda.OutOfMemoryError:
+                    raise
+                except Exception as exc:
+                    raise CheckpointLoadError("The high-resolution checkpoints could not be loaded.") from exc
             stage("preparing_image")
             with Image.open(folder / "input") as original:
                 image = ImageOps.exif_transpose(original)
                 has_alpha = any(band.lower() == "a" for band in image.getbands()) or "transparency" in image.info
                 image = image.convert("RGBA" if has_alpha else "RGB")
-            mesh = pipeline.run(image, pipeline_type="512", num_samples=1, seed=42, progress_callback=stage)[0]
+            steps = {"steps": settings.sampling_steps}
+            mesh = pipeline.run(
+                image, pipeline_type=settings.pipeline_type, num_samples=1, seed=settings.seed,
+                sparse_structure_sampler_params=steps, shape_slat_sampler_params=steps,
+                tex_slat_sampler_params=steps, progress_callback=stage,
+            )[0]
             stage("exporting_glb")
             glb = o_voxel.postprocess.to_glb(
                 vertices=mesh.vertices, faces=mesh.faces, attr_volume=mesh.attrs,
                 coords=mesh.coords, attr_layout=mesh.layout, voxel_size=mesh.voxel_size,
                 aabb=[[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-                texture_size=1024, decimation_target=100000, remesh=False, verbose=True,
+                texture_size=settings.texture_size, decimation_target=settings.decimation_target, remesh=False, verbose=True,
             )
             glb.export(folder / "model.partial.glb", extension_webp=False)
-            pipe.send(("artifact_ready", job_id))
+            pipe.send(("artifact_ready", job_id, round(1 / mesh.voxel_size)))
             del mesh, glb, image
         except Exception as exc:
             log.exception("Generation failed for %s", job_id)
@@ -98,6 +135,8 @@ def worker_main(pipe, directory):
                 message = "The GPU ran out of memory."
             elif cuda_failure:
                 message = "The GPU reported an error."
+            elif isinstance(exc, CheckpointLoadError):
+                message = str(exc)
             elif isinstance(exc, ValueError) and str(exc) == "No usable foreground found.":
                 message = str(exc)
             else:
